@@ -131,6 +131,13 @@ This runs the server with `node --watch`, which restarts it whenever you save `s
 `src/app.js`. On each save, Node.js prints `Change detected in` followed by the changed file's path,
 then `Restarting 'src/server.js'`. The old server logs `Received SIGTERM, shutting down`, because
 watch mode stops it with the SIGTERM signal, and the new one logs its `Server listening on` line.
+
+Watch mode follows the files it loaded. A save that replaces a file, by writing a new file and
+renaming it over the old one as `sed -i` does, can make Node.js restart once and then stop noticing
+later saves of that file, even saves that write into it. If a save does not restart the server,
+stop `npm run dev` with Ctrl+C and start it again, or set your editor to save in place, writing
+into the existing file.
+
 Stop it with Ctrl+C. In this mode, one Ctrl+C stops the server at once, as
 [Stopping the server](#stopping-the-server) explains.
 
@@ -158,6 +165,37 @@ Under `npm run dev`, a single Ctrl+C always stops the server at once, even with 
 whichever shell npm uses, because Node.js watch mode passes the Ctrl+C on to the server as a
 second SIGINT. As with bash under `npm start`, the server may stop before it prints its shutdown
 line. npm then reports exit status 130 with dash but 0 with bash.
+
+Ctrl+C works under both commands because the terminal sends SIGINT to every process of the command
+running in the foreground, the server included. `kill` sends a signal only to the process id it
+is given. On Debian and Ubuntu, whose `/bin/sh` is dash, the shell npm runs the script with does
+not pass a signal on to the server, so a signal sent to npm's process id alone does not stop the
+server, under `npm start` or `npm run dev`. There, SIGTERM sent to npm makes npm exit at once with
+status 143 and leaves the server running on its port, so the next `npm start` fails with
+`EADDRINUSE`, as [When the server cannot start](#when-the-server-cannot-start) shows. SIGINT sent
+to npm alone does nothing visible. With bash, a signal sent to npm reaches the server.
+
+If you started the server in the background with `npm start &` or `npm run dev &`, stop it with
+`kill %1` in the same terminal, where `1` is the job number the shell printed in square brackets.
+`kill %1` signals every process of that job, so the server prints
+`Received SIGTERM, shutting down` and frees its port, and npm reports exit status 143.
+
+From any terminal, you can instead signal the process that listens on the server's port. Under
+`npm start` or `node src/server.js`, that process is the server itself. Replace 3000 with your
+port if you changed `PORT`:
+
+```bash
+kill -TERM "$(lsof -ti tcp:3000 -sTCP:LISTEN)"
+```
+
+The server prints `Received SIGTERM, shutting down` and exits with code 0, and under `npm start`,
+npm then exits with status 0 too. The same command stops a server left running on its port by a
+`kill` sent to npm's process id. It does not stop `npm run dev`: there the process on the port is
+the server that watch mode runs, so the server prints its shutdown line, Node.js prints
+`Completed running 'src/server.js'. Waiting for file changes before restarting...`, and watch mode
+keeps running. Stop `npm run dev` with Ctrl+C or `kill %1`. If a `kill` sent to npm's process id
+has already left `npm run dev` running, `ps -ef` lists watch mode as `node --watch src/server.js`,
+and `kill -TERM` followed by that line's process id stops both watch mode and the server.
 
 On Windows, Ctrl+C delivers SIGINT the same way, but SIGTERM, the other signal the server handles,
 is not delivered there as it is on macOS and Linux.
@@ -788,8 +826,10 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 ```
 
-SIGINT is what Ctrl+C sends. SIGTERM is the standard "please stop" signal, sent by `kill`, by
-process managers and by `npm run dev` on each restart. `shutdown()` calls `flush()` right after
+SIGINT is what Ctrl+C sends. SIGTERM is the standard "please stop" signal, sent by `kill` to the
+process id it is given, by process managers and by `npm run dev` on each restart. Under
+`npm start`, the signal must reach the server's own process, as
+[Stopping the server](#stopping-the-server) explains. `shutdown()` calls `flush()` right after
 logging, so the line is being written while the server closes, and a write error is caught from
 that moment on. If stdout is a pipe whose reader has exited, that error is `EPIPE` and the line is
 lost, but the shutdown carries on. The callback given to `server.close()` runs once every
