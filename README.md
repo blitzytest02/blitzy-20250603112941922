@@ -146,9 +146,15 @@ It then stops accepting connections, closes idle ones and exits with code 0. npm
 Ctrl+C and reports it as exit status 130, the conventional code for a command interrupted by
 Ctrl+C. Run `node src/server.js` directly to see the server's own exit code, 0.
 
-If a client keeps a request open, the shutdown waits for it. A second Ctrl+C ends the process
-immediately. On Windows, Ctrl+C delivers SIGINT the same way, but SIGTERM, the other signal the
-server handles, is not delivered there as it is on macOS and Linux.
+Run directly with `node src/server.js`, the server waits for any request a client keeps open, and
+a second Ctrl+C ends the process immediately. Under `npm start` on macOS and Linux, what happens
+depends on the shell npm runs the script with, `/bin/sh`. With dash, the `/bin/sh` of Debian and
+Ubuntu, the server behaves as it does when run directly. With bash, the `/bin/sh` of macOS and
+Fedora, npm passes the Ctrl+C on to the server as a second SIGINT, so the server stops at once,
+even with a request open, and may stop before it prints its shutdown line.
+
+On Windows, Ctrl+C delivers SIGINT the same way, but SIGTERM, the other signal the server handles,
+is not delivered there as it is on macOS and Linux.
 
 ### When the server cannot start
 
@@ -355,7 +361,6 @@ A passing run prints one `✔` line per test, in file order, then a summary. The
 The lines that matter are `ℹ tests 8`, `ℹ pass 8` and `ℹ fail 0`, and `npm test` exits with code
 0. A failing test prints `✖` instead of `✔`, together with the assertion that failed, and the
 command exits with code 1.
-
 
 ## How the code works
 
@@ -592,8 +597,8 @@ The rejected value is printed through `escapeForLog()`, a helper defined near th
 function escapeForLog(text) {
   const escaped = JSON.stringify(String(text)).slice(1, -1);
   return escaped.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
-    // A format character beyond U+FFFF, such as a tag character from U+E0000, is a pair of UTF-16
-    // code units, so each unit gets its own \u escape and neither half is lost.
+    // A format character beyond U+FFFF, such as a tag character from U+E0020 to U+E007F, is a
+    // pair of UTF-16 code units, so each unit gets its own \u escape and neither half is lost.
     return char
       .split('')
       .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
@@ -618,7 +623,7 @@ unescaped, but it can still make the one line misleading. The right-to-left over
 make a terminal or log viewer show the text after it in reverse order, and the zero-width space
 U+200B is not shown at all. Both are printed as visible escapes instead, so a `PORT` of `12`,
 U+202E and `34` shows `Invalid PORT "12\u202e34"`. A format character above U+FFFF, such as the
-tag characters from U+E0000, is stored as two UTF-16 code units, and each gets its own escape, so
+tag characters U+E0020 to U+E007F, is stored as two UTF-16 code units, each with its own escape, so
 U+E0041 prints as `\udb40\udc41`. An ordinary value such as `abc` comes back unchanged, so the
 messages in the Run section are exactly what the server prints.
 
@@ -738,8 +743,10 @@ that moment on. If stdout is a pipe whose reader has exited, that error is `EPIP
 lost, but the shutdown carries on. The callback given to `server.close()` runs once every
 connection has closed. Idle keep-alive connections are closed at once, but a client that holds a
 request open keeps the callback waiting until that connection ends, and a second Ctrl+C ends the
-process immediately instead. Once the callback runs, it waits for the flush, and `process.exit(0)`
-then ends the process with the success code.
+process immediately instead. That is how `node src/server.js` behaves when run directly;
+[Stopping the server](#stopping-the-server) explains how `npm start` can change it. Once the
+callback runs, it waits for the flush, and `process.exit(0)` then ends the process with the
+success code.
 
 ### test/app.test.js: testing the server
 

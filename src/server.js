@@ -19,8 +19,8 @@ const DEFAULT_HOST = '127.0.0.1';
 function escapeForLog(text) {
   const escaped = JSON.stringify(String(text)).slice(1, -1);
   return escaped.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
-    // A format character beyond U+FFFF, such as a tag character from U+E0000, is a pair of UTF-16
-    // code units, so each unit gets its own \u escape and neither half is lost.
+    // A format character beyond U+FFFF, such as a tag character from U+E0020 to U+E007F, is a
+    // pair of UTF-16 code units, so each unit gets its own \u escape and neither half is lost.
     return char
       .split('')
       .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
