@@ -46,7 +46,7 @@ function send(res, statusCode, body, extraHeaders = {}) {
  * @returns {void}
  */
 export function handleRequest(req, res) {
-  // URL.parse returns null for an unparseable target such as `http://[`, where `new URL()`
+  // URL.parse returns null for an unparseable target such as `http://[`, where `new URL`
   // would throw ERR_INVALID_URL and the uncaught error would crash the server. A null result
   // leaves pathname undefined, which falls through to 404. The base only resolves relative
   // targets like `/hello?name=reader` and never reaches a response.

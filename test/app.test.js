@@ -10,11 +10,12 @@ import http from 'node:http';
 // installs signal handlers, none of which a test should trigger.
 import { createServer } from '../src/app.js';
 
-let server;
-let baseUrl;
+// before fills in both properties once the server is listening; after and every test read them.
+// Sharing them as properties of one const object means no binding is ever reassigned.
+const fixture = { server: undefined, baseUrl: undefined };
 
 before(async () => {
-  server = createServer();
+  const server = createServer();
   // Port 0 asks the operating system for any free port, so these tests pass while the reader's
   // own server holds 3000, and loopback means they need no network access. A bind failure
   // arrives as an 'error' event, not through the listen callback, so without this listener the
@@ -26,28 +27,29 @@ before(async () => {
       resolve();
     });
   });
+  fixture.server = server;
   // address() returns null until the server is listening, so the port is read only after the
   // listen callback has fired.
-  baseUrl = `http://127.0.0.1:${server.address().port}`;
+  fixture.baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 
 // close() returns the server rather than a promise, so wrapping its callback is what makes the
 // runner wait for the shutdown. On Node.js 24 and later it also closes the idle keep-alive
 // connections fetch leaves open, so the test process exits as soon as the summary prints.
-// baseUrl stays unset when listen() failed, which before has already reported, so there is
+// fixture.baseUrl stays unset when listen() failed, which before has already reported, so there is
 // nothing to close. A close() error, such as ERR_SERVER_NOT_RUNNING after an early close,
 // rejects the hook so the failure is reported instead of hidden.
 after(async () => {
-  if (baseUrl === undefined) {
+  if (fixture.baseUrl === undefined) {
     return;
   }
   await new Promise((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
+    fixture.server.close((err) => (err ? reject(err) : resolve()));
   });
 });
 
 test('GET /hello returns 200, text/plain and the exact body', async () => {
-  const res = await fetch(`${baseUrl}/hello`);
+  const res = await fetch(`${fixture.baseUrl}/hello`);
 
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-type'), 'text/plain; charset=utf-8');
@@ -57,14 +59,14 @@ test('GET /hello returns 200, text/plain and the exact body', async () => {
 });
 
 test('GET /hello ignores the query string', async () => {
-  const res = await fetch(`${baseUrl}/hello?name=reader`);
+  const res = await fetch(`${fixture.baseUrl}/hello?name=reader`);
 
   assert.equal(res.status, 200);
   assert.equal(await res.text(), 'Hello world');
 });
 
 test('HEAD /hello returns the GET headers and no body', async () => {
-  const res = await fetch(`${baseUrl}/hello`, { method: 'HEAD' });
+  const res = await fetch(`${fixture.baseUrl}/hello`, { method: 'HEAD' });
 
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-type'), 'text/plain; charset=utf-8');
@@ -74,7 +76,7 @@ test('HEAD /hello returns the GET headers and no body', async () => {
 });
 
 test('POST /hello returns 405 with an Allow header', async () => {
-  const res = await fetch(`${baseUrl}/hello`, { method: 'POST' });
+  const res = await fetch(`${fixture.baseUrl}/hello`, { method: 'POST' });
 
   assert.equal(res.status, 405);
   // HTTP semantics require a 405 response to list the methods the resource does accept.
@@ -84,7 +86,7 @@ test('POST /hello returns 405 with an Allow header', async () => {
 });
 
 test('an unknown path returns 404', async () => {
-  const res = await fetch(`${baseUrl}/goodbye`);
+  const res = await fetch(`${fixture.baseUrl}/goodbye`);
 
   assert.equal(res.status, 404);
   assert.equal(res.headers.get('content-type'), 'text/plain; charset=utf-8');
@@ -94,7 +96,7 @@ test('an unknown path returns 404', async () => {
 test('POST to an unknown path returns 404, not 405', async () => {
   // A 405 here would mean the method was checked first. 404 proves the handler resolves the
   // path before it looks at the method, so an unknown path is "not found" whatever the method.
-  const res = await fetch(`${baseUrl}/goodbye`, { method: 'POST' });
+  const res = await fetch(`${fixture.baseUrl}/goodbye`, { method: 'POST' });
 
   assert.equal(res.status, 404);
   assert.equal(await res.text(), 'Not Found');
@@ -104,7 +106,7 @@ test('trailing-slash and case variants of /hello return 404', async () => {
   // Paths match exactly and case-sensitively, and no redirect is issued for a trailing slash.
   // The path is the assertion message, so a failure names the variant that broke.
   for (const path of ['/hello/', '/Hello', '/HELLO']) {
-    const res = await fetch(`${baseUrl}${path}`);
+    const res = await fetch(`${fixture.baseUrl}${path}`);
 
     assert.equal(res.status, 404, path);
     assert.equal(await res.text(), 'Not Found', path);
@@ -118,7 +120,7 @@ test('an unparseable request target returns 404 and the server keeps running', a
   // null instead, so the handler answers 404.
   const statusCode = await new Promise((resolve, reject) => {
     const req = http.get(
-      { host: '127.0.0.1', port: server.address().port, path: 'http://[' },
+      { host: '127.0.0.1', port: fixture.server.address().port, path: 'http://[' },
       (res) => {
         // Draining the body lets the response end and frees the socket, so it cannot hold
         // the test process open.
@@ -143,7 +145,7 @@ test('an unparseable request target returns 404 and the server keeps running', a
   assert.equal(statusCode, 404);
 
   // A normal request after the malformed one proves the process survived it.
-  const res = await fetch(`${baseUrl}/hello`);
+  const res = await fetch(`${fixture.baseUrl}/hello`);
 
   assert.equal(res.status, 200);
   assert.equal(await res.text(), 'Hello world');

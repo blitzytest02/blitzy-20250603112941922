@@ -11,21 +11,30 @@ const DEFAULT_HOST = '127.0.0.1';
 
 // Renders a value for a one-line log message, which guards against log injection (CWE-117): a
 // PORT, or a HOST that getaddrinfo repeats in err.message, could otherwise carry a newline that
-// forges an extra log line, or an escape code the terminal acts on. JSON.stringify escapes \n and
-// the other C0 controls, the backslash and the double quote; the replace adds DEL, the C1
-// controls and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
+// forges an extra log line, an escape code the terminal acts on, or a bidi override such as
+// U+202E that makes the terminal display the message in a misleading order without adding a line.
+// JSON.stringify escapes \n and the other C0 controls, the backslash and the double quote; the
+// replace adds DEL, the C1 controls, the invisible format characters (Cf), which include every
+// bidi control, and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
 function escapeForLog(text) {
   const escaped = JSON.stringify(String(text)).slice(1, -1);
-  return escaped.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => {
-    return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  return escaped.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
+    // A format character beyond U+FFFF, such as a tag character from U+E0000, is a pair of UTF-16
+    // code units, so each unit gets its own \u escape and neither half is lost.
+    return char
+      .split('')
+      .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
+      .join('');
   });
 }
 
-// Resolves once everything written to `stream` so far has reached the operating system, because
+// Resolves once everything written to `stream` so far has reached the operating system, or once
+// a write fails, in which case the output still pending is lost. Callers wait for it because
 // process.exit() discards a write still pending when stdout or stderr is a pipe whose reader has
 // fallen behind. Writes complete in order, so this empty write's callback follows the line before
-// it. If the reader has gone, the EPIPE also arrives as an 'error' event that, unhandled, would
-// replace the exit code with a stack trace. The listener stays: an exit follows every flush.
+// it. If the reader has gone, the write fails with EPIPE, which also arrives as an 'error' event
+// that, unhandled, would replace the exit code with a stack trace. The listener is never removed:
+// that event comes after the write callback, while shutdown() may still be waiting for close().
 function flush(stream) {
   return new Promise((resolve) => {
     stream.on('error', resolve);
@@ -75,10 +84,13 @@ server.listen(port, host, () => {
 // Stops the server in response to a signal and exits once every connection has closed.
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down`);
-  // Started at once, so the line goes out and a write error is caught while close() waits.
+  // Started before close(), so the line is written, or its write error such as EPIPE caught,
+  // while close() waits. After a write error the line is lost, but the exit code is still 0.
   const logFlushed = flush(process.stdout);
   // On Node.js 24 and later, close() stops accepting connections and also closes idle keep-alive
-  // ones, so a finished curl or browser request does not keep the process alive.
+  // ones, so a finished curl or browser request does not keep the process alive. A client that
+  // holds a request open keeps the callback, and so the exit, waiting until that connection
+  // ends, or until a second Ctrl+C ends the process at once.
   server.close(async () => {
     await logFlushed;
     process.exit(0);

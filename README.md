@@ -254,10 +254,10 @@ Hello world
 The `Date` value varies. The body has no trailing newline, so your prompt appears right after
 `Hello world` on the same line.
 
-The code in `src/app.js` sets only `Content-Type` and `Content-Length`. Node.js adds `Date`,
-`Connection` and `Keep-Alive` itself: `Connection: keep-alive` lets the client reuse the same
-connection for its next request, and `Keep-Alive: timeout=5` says the server closes a connection
-that stays idle for 5 seconds.
+On this response, the code in `src/app.js` sets only `Content-Type` and `Content-Length`. Node.js
+adds `Date`, `Connection` and `Keep-Alive` itself: `Connection: keep-alive` lets the client reuse
+the same connection for its next request, and `Keep-Alive: timeout=5` says the server closes a
+connection that stays idle for 5 seconds.
 
 ### In a browser
 
@@ -483,7 +483,7 @@ The request listener routes each request it receives in three steps:
 
 ```js
 export function handleRequest(req, res) {
-  // URL.parse returns null for an unparseable target such as `http://[`, where `new URL()`
+  // URL.parse returns null for an unparseable target such as `http://[`, where `new URL`
   // would throw ERR_INVALID_URL and the uncaught error would crash the server. A null result
   // leaves pathname undefined, which falls through to 404. The base only resolves relative
   // targets like `/hello?name=reader` and never reaches a response.
@@ -584,13 +584,20 @@ The rejected value is printed through `escapeForLog()`, a helper defined near th
 ```js
 // Renders a value for a one-line log message, which guards against log injection (CWE-117): a
 // PORT, or a HOST that getaddrinfo repeats in err.message, could otherwise carry a newline that
-// forges an extra log line, or an escape code the terminal acts on. JSON.stringify escapes \n and
-// the other C0 controls, the backslash and the double quote; the replace adds DEL, the C1
-// controls and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
+// forges an extra log line, an escape code the terminal acts on, or a bidi override such as
+// U+202E that makes the terminal display the message in a misleading order without adding a line.
+// JSON.stringify escapes \n and the other C0 controls, the backslash and the double quote; the
+// replace adds DEL, the C1 controls, the invisible format characters (Cf), which include every
+// bidi control, and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
 function escapeForLog(text) {
   const escaped = JSON.stringify(String(text)).slice(1, -1);
-  return escaped.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => {
-    return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  return escaped.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
+    // A format character beyond U+FFFF, such as a tag character from U+E0000, is a pair of UTF-16
+    // code units, so each unit gets its own \u escape and neither half is lost.
+    return char
+      .split('')
+      .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
+      .join('');
   });
 }
 ```
@@ -602,23 +609,29 @@ injection. `escapeForLog()` prints such characters as escape sequences instead, 
 stays on one line and shows `Invalid PORT "abc\nFailed to start server: forged"`, followed by the
 usual `: expected an integer from 0 to 65535`. `JSON.stringify()` writes the same escapes a
 JavaScript string literal uses, and `.slice(1, -1)` removes the double quotes it adds around them.
-The `replace()` call's pattern, `[\p{Cc}\p{Zl}\p{Zp}]`, then escapes two groups of characters that
-`JSON.stringify()` leaves as they are: the remaining control characters (Unicode category `Cc`:
-DEL, U+007F, and the C1 controls U+0080 to U+009F) and the line and paragraph separators U+2028
-and U+2029 (categories `Zl` and `Zp`). Other invisible characters, such as the zero-width space
-U+200B or the right-to-left override U+202E (Unicode format characters, category `Cf`), are
-printed unchanged. They cannot start a new line, so the message still stays on one line. An
-ordinary value such as `abc` comes back unchanged, so the messages in the Run section are exactly
-what the server prints.
+The `replace()` call's pattern, `[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]`, then escapes three groups of
+characters that `JSON.stringify()` leaves as they are: the remaining control characters (Unicode
+category `Cc`: DEL, U+007F, and the C1 controls U+0080 to U+009F), the invisible format characters
+(category `Cf`), and the line and paragraph separators U+2028 and U+2029 (categories `Zl` and
+`Zp`). A format character cannot start a new line, so it could not add a fake line even
+unescaped, but it can still make the one line misleading. The right-to-left override U+202E can
+make a terminal or log viewer show the text after it in reverse order, and the zero-width space
+U+200B is not shown at all. Both are printed as visible escapes instead, so a `PORT` of `12`,
+U+202E and `34` shows `Invalid PORT "12\u202e34"`. A format character above U+FFFF, such as the
+tag characters from U+E0000, is stored as two UTF-16 code units, and each gets its own escape, so
+U+E0041 prints as `\udb40\udc41`. An ordinary value such as `abc` comes back unchanged, so the
+messages in the Run section are exactly what the server prints.
 
 Before `process.exit(1)`, the code waits for `flush()`, the other helper at the top of the file:
 
 ```js
-// Resolves once everything written to `stream` so far has reached the operating system, because
+// Resolves once everything written to `stream` so far has reached the operating system, or once
+// a write fails, in which case the output still pending is lost. Callers wait for it because
 // process.exit() discards a write still pending when stdout or stderr is a pipe whose reader has
 // fallen behind. Writes complete in order, so this empty write's callback follows the line before
-// it. If the reader has gone, the EPIPE also arrives as an 'error' event that, unhandled, would
-// replace the exit code with a stack trace. The listener stays: an exit follows every flush.
+// it. If the reader has gone, the write fails with EPIPE, which also arrives as an 'error' event
+// that, unhandled, would replace the exit code with a stack trace. The listener is never removed:
+// that event comes after the write callback, while shutdown() may still be waiting for close().
 function flush(stream) {
   return new Promise((resolve) => {
     stream.on('error', resolve);
@@ -631,13 +644,17 @@ Usually `console.error()` hands its line to the operating system at once. When s
 into another program that has fallen behind, though, the pipe is full and Node.js keeps the line
 queued until there is room. `process.exit()` ends the process immediately and throws that queue
 away, so the one line explaining the failure would be lost. `flush()` writes an empty string with
-a callback. A stream completes its writes in order, so the callback runs only once the line
-before it has gone out, and `await` waits for that callback. This is a top-level `await`, which
-ES modules allow outside any function: it pauses the rest of the file, so a rejected `PORT` still
-exits before the server is created. If the reading program has already exited, the write fails
-with `EPIPE`, which Node.js also reports as an `'error'` event on the stream. The `'error'`
-listener resolves the promise as well, so the process ends with its own exit code instead of a
-stack trace.
+a callback. A stream completes its writes in order, so when the writes succeed, the callback runs
+only once the line before it has gone out, and `await` waits for that callback. This is a
+top-level `await`, which ES modules allow outside any function: it pauses the rest of the file, so
+a rejected `PORT` still exits before the server is created. If the reading program has already
+exited, the write fails with `EPIPE` and the line is lost. `flush()` settles either way: the
+callback runs with the error, and Node.js then reports the same error as an `'error'` event on
+the stream. So only a successful write means the output reached the operating system. The
+`'error'` listener, which resolves the promise as well, keeps that event from crashing the
+process, so it ends with its own exit code instead of a stack trace. The listener is never
+removed, because the event arrives after the callback, which in `shutdown()` below can be while
+the server is still closing.
 
 The host is read the same way as the port, with `DEFAULT_HOST` set to `'127.0.0.1'`:
 
@@ -693,10 +710,13 @@ Finally, the process handles the two shutdown signals:
 ```js
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down`);
-  // Started at once, so the line goes out and a write error is caught while close() waits.
+  // Started before close(), so the line is written, or its write error such as EPIPE caught,
+  // while close() waits. After a write error the line is lost, but the exit code is still 0.
   const logFlushed = flush(process.stdout);
   // On Node.js 24 and later, close() stops accepting connections and also closes idle keep-alive
-  // ones, so a finished curl or browser request does not keep the process alive.
+  // ones, so a finished curl or browser request does not keep the process alive. A client that
+  // holds a request open keeps the callback, and so the exit, waiting until that connection
+  // ends, or until a second Ctrl+C ends the process at once.
   server.close(async () => {
     await logFlushed;
     process.exit(0);
@@ -713,10 +733,13 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 SIGINT is what Ctrl+C sends. SIGTERM is the standard "please stop" signal, sent by `kill`, by
 process managers and by `npm run dev` on each restart. `shutdown()` calls `flush()` right after
-logging, so the line is already on its way out while the server closes, and a write error is
-caught from that moment on. The callback given to `server.close()` runs once every connection has
-closed. It waits for that flush, and `process.exit(0)` then ends the process with the success
-code.
+logging, so the line is being written while the server closes, and a write error is caught from
+that moment on. If stdout is a pipe whose reader has exited, that error is `EPIPE` and the line is
+lost, but the shutdown carries on. The callback given to `server.close()` runs once every
+connection has closed. Idle keep-alive connections are closed at once, but a client that holds a
+request open keeps the callback waiting until that connection ends, and a second Ctrl+C ends the
+process immediately instead. Once the callback runs, it waits for the flush, and `process.exit(0)`
+then ends the process with the success code.
 
 ### test/app.test.js: testing the server
 
@@ -733,11 +756,16 @@ import http from 'node:http';
 import { createServer } from '../src/app.js';
 ```
 
-Two hooks start one real server before the tests and stop it after them:
+One object, `fixture`, holds the server and its URL. Two hooks start one real server before the
+tests and stop it after them:
 
 ```js
+// before fills in both properties once the server is listening; after and every test read them.
+// Sharing them as properties of one const object means no binding is ever reassigned.
+const fixture = { server: undefined, baseUrl: undefined };
+
 before(async () => {
-  server = createServer();
+  const server = createServer();
   // Port 0 asks the operating system for any free port, so these tests pass while the reader's
   // own server holds 3000, and loopback means they need no network access. A bind failure
   // arrives as an 'error' event, not through the listen callback, so without this listener the
@@ -749,26 +777,32 @@ before(async () => {
       resolve();
     });
   });
+  fixture.server = server;
   // address() returns null until the server is listening, so the port is read only after the
   // listen callback has fired.
-  baseUrl = `http://127.0.0.1:${server.address().port}`;
+  fixture.baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 
 // close() returns the server rather than a promise, so wrapping its callback is what makes the
 // runner wait for the shutdown. On Node.js 24 and later it also closes the idle keep-alive
 // connections fetch leaves open, so the test process exits as soon as the summary prints.
-// baseUrl stays unset when listen() failed, which before has already reported, so there is
+// fixture.baseUrl stays unset when listen() failed, which before has already reported, so there is
 // nothing to close. A close() error, such as ERR_SERVER_NOT_RUNNING after an early close,
 // rejects the hook so the failure is reported instead of hidden.
 after(async () => {
-  if (baseUrl === undefined) {
+  if (fixture.baseUrl === undefined) {
     return;
   }
   await new Promise((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
+    fixture.server.close((err) => (err ? reject(err) : resolve()));
   });
 });
 ```
+
+The hooks and the tests share the server and its URL through the properties of `fixture` rather
+than through variables that `before` reassigns. Because `fixture` is declared with `const`, the
+name always refers to the same object, yet `before` can still fill in its properties. It sets
+them once, after the server is listening, and `after` and the tests only read them.
 
 `before` runs once before the first test and `after` once after the last. `listen()` and
 `close()` report through callbacks, not promises, so each hook wraps its call in a promise that
@@ -783,7 +817,7 @@ Each test sends a request with the global `fetch` and asserts on the response:
 
 ```js
 test('GET /hello returns 200, text/plain and the exact body', async () => {
-  const res = await fetch(`${baseUrl}/hello`);
+  const res = await fetch(`${fixture.baseUrl}/hello`);
 
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('content-type'), 'text/plain; charset=utf-8');
@@ -799,9 +833,9 @@ strict comparison, so the number `11` would fail.
 
 The last test needs a request that `fetch` cannot send. `fetch` normalises every URL, so it can
 never put `http://[` on the wire. The test uses `http.get` instead, with the options
-`{ host: '127.0.0.1', port: server.address().port, path: 'http://[' }`, because `http.get` writes
-`path` into the request line exactly as given. It expects `404`, then sends a normal
-`GET /hello` and expects `200`, which proves the server survived. If a change ever made the
+`{ host: '127.0.0.1', port: fixture.server.address().port, path: 'http://[' }`, because
+`http.get` writes `path` into the request line exactly as given. It expects `404`, then sends a
+normal `GET /hello` and expects `200`, which proves the server survived. If a change ever made the
 handler throw on that target, the test would fail at once with the thrown error rather than wait
 for a response that never comes.
 
