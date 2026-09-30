@@ -14,6 +14,14 @@ import { createServer } from '../src/app.js';
 // Sharing them as properties of one const object means no binding is ever reassigned.
 const fixture = { server: undefined, baseUrl: undefined };
 
+// A handler that throws never writes a reply. The test runner catches the exception instead of
+// crashing, so a fetch waiting for that reply would wait forever and the error would never be
+// printed. Closing every connection makes the waiting request fail at once, so the test fails,
+// the run finishes and the runner prints the error. This is an uncaughtExceptionMonitor, which
+// observes the exception without handling it, so nothing masks the error and npm test still
+// exits with code 1.
+const closeConnectionsOnCrash = () => fixture.server.closeAllConnections();
+
 before(async () => {
   const server = createServer();
   // Port 0 asks the operating system for any free port, so these tests pass while the reader's
@@ -31,18 +39,22 @@ before(async () => {
   // address() returns null until the server is listening, so the port is read only after the
   // listen callback has fired.
   fixture.baseUrl = `http://127.0.0.1:${server.address().port}`;
+  // Registered only now, so the monitor never runs before there is a server to close.
+  process.on('uncaughtExceptionMonitor', closeConnectionsOnCrash);
 });
 
 // close() returns the server rather than a promise, so wrapping its callback is what makes the
 // runner wait for the shutdown. On Node.js 24 and later it also closes the idle keep-alive
 // connections fetch leaves open, so the test process exits as soon as the summary prints.
 // fixture.baseUrl stays unset when listen() failed, which before has already reported, so there is
-// nothing to close. A close() error, such as ERR_SERVER_NOT_RUNNING after an early close,
-// rejects the hook so the failure is reported instead of hidden.
+// nothing to close and no monitor to remove. A close() error, such as ERR_SERVER_NOT_RUNNING
+// after an early close, rejects the hook so the failure is reported instead of hidden.
 after(async () => {
   if (fixture.baseUrl === undefined) {
     return;
   }
+  // The tests are over, so the monitor comes off and the process is left as the suite found it.
+  process.off('uncaughtExceptionMonitor', closeConnectionsOnCrash);
   await new Promise((resolve, reject) => {
     fixture.server.close((err) => (err ? reject(err) : resolve()));
   });
@@ -130,9 +142,10 @@ test('an unparseable request target returns 404 and the server keeps running', a
       },
     );
     // Run standalone, a handler that throws on this target crashes the server. Inside the test
-    // runner the error is caught instead and this request would wait forever for a reply, so a
-    // monitor, which observes an uncaught error without handling it, fails the test at once
-    // with that error. Destroying the request frees the socket so the after hook can close.
+    // runner the error is caught instead, and closeConnectionsOnCrash closes this connection, so
+    // the request fails at once, but only with 'socket hang up'. This monitor rejects with the
+    // thrown error itself before that hang-up arrives, so the failure names the real cause.
+    // Destroying the request releases its socket straight away.
     const onUncaught = (err) => {
       req.destroy();
       reject(err);

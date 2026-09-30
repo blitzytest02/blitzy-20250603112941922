@@ -13,13 +13,18 @@ const DEFAULT_HOST = '127.0.0.1';
 // PORT, or a HOST that getaddrinfo repeats in err.message, could otherwise carry a newline that
 // forges an extra log line, an escape code the terminal acts on, or a bidi override such as
 // U+202E that makes the terminal display the message in a misleading order without adding a line.
+// The HOST on the listening line goes through it too: a HOST that binds can still hold an
+// invisible character that name lookup ignores, so the logged URL would differ from the one shown.
 // JSON.stringify escapes \n and the other C0 controls, the backslash and the double quote; the
 // replace adds DEL, the C1 controls, the invisible format characters (Cf), which include every
-// bidi control, and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
+// bidi control, the U+2028 and U+2029 line breaks, and the other default-ignorable code points,
+// which display as nothing, such as the variation selectors U+FE00 to U+FE0F (category Mn).
+// Other text, such as é, is left unchanged.
 function escapeForLog(text) {
   const escaped = JSON.stringify(String(text)).slice(1, -1);
-  return escaped.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
-    // A format character beyond U+FFFF, such as a tag character from U+E0020 to U+E007F, is a
+  const unsafe = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+  return escaped.replace(unsafe, (char) => {
+    // A character beyond U+FFFF, such as a tag character from U+E0020 to U+E007F, is a
     // pair of UTF-16 code units, so each unit gets its own \u escape and neither half is lost.
     return char
       .split('')
@@ -78,7 +83,10 @@ server.listen(port, host, () => {
   const actualPort = server.address().port;
   // An IPv6 literal such as ::1 must be wrapped in brackets inside a URL: http://[::1]:3000.
   const urlHost = host.includes(':') ? `[${host}]` : host;
-  console.log(`Server listening on http://${urlHost}:${actualPort}`);
+  // Node's dns.lookup applies IDNA mapping, which drops invisible characters, so a HOST such as
+  // local<U+200B>host binds. Printed raw, its URL would carry bytes the terminal does not show.
+  // Ordinary hosts, such as localhost, 0.0.0.0 and [::1], come back unchanged.
+  console.log(`Server listening on http://${escapeForLog(urlHost)}:${actualPort}`);
 });
 
 // Stops the server in response to a signal and exits once every connection has closed.

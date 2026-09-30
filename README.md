@@ -370,6 +370,24 @@ The lines that matter are `ℹ tests 8`, `ℹ pass 8` and `ℹ fail 0`, and `npm
 0. A failing test prints `✖` instead of `✔`, together with the assertion that failed, and the
 command exits with code 1.
 
+If a change makes the code in `src/app.js` throw while it handles a request, the run still
+finishes instead of hanging. Each test whose request hits the throw prints `✖`. A test that uses
+`fetch` fails with `TypeError: fetch failed`, caused by `Error [SocketError]: other side closed`,
+because the server closed the connection without replying. When the throw hits the `http.get`
+request in the last test, that test fails with the thrown error itself. Above the summary, the
+runner prints the thrown error once for each request that hit it. For example, adding
+`throw new Error('boom on goodbye')` for the `/goodbye` path fails tests 5 and 6 and prints this
+line twice:
+
+```text
+ℹ Error: Test hook "before" at test/app.test.js:25:1 generated asynchronous activity after the test ended. This activity created the error "Error: boom on goodbye" and would have caused the test to fail, but instead triggered an uncaughtException event.
+```
+
+The runner names `before` because that hook started the server the handler runs in. As with any
+failing test, `npm test` exits with code 1.
+[test/app.test.js: testing the server](#testapptestjs-testing-the-server) explains how the tests
+turn the throw into a failure.
+
 ## How the code works
 
 The whole project is seven files:
@@ -599,13 +617,18 @@ The rejected value is printed through `escapeForLog()`, a helper defined near th
 // PORT, or a HOST that getaddrinfo repeats in err.message, could otherwise carry a newline that
 // forges an extra log line, an escape code the terminal acts on, or a bidi override such as
 // U+202E that makes the terminal display the message in a misleading order without adding a line.
+// The HOST on the listening line goes through it too: a HOST that binds can still hold an
+// invisible character that name lookup ignores, so the logged URL would differ from the one shown.
 // JSON.stringify escapes \n and the other C0 controls, the backslash and the double quote; the
 // replace adds DEL, the C1 controls, the invisible format characters (Cf), which include every
-// bidi control, and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
+// bidi control, the U+2028 and U+2029 line breaks, and the other default-ignorable code points,
+// which display as nothing, such as the variation selectors U+FE00 to U+FE0F (category Mn).
+// Other text, such as é, is left unchanged.
 function escapeForLog(text) {
   const escaped = JSON.stringify(String(text)).slice(1, -1);
-  return escaped.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (char) => {
-    // A format character beyond U+FFFF, such as a tag character from U+E0020 to U+E007F, is a
+  const unsafe = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+  return escaped.replace(unsafe, (char) => {
+    // A character beyond U+FFFF, such as a tag character from U+E0020 to U+E007F, is a
     // pair of UTF-16 code units, so each unit gets its own \u escape and neither half is lost.
     return char
       .split('')
@@ -622,18 +645,25 @@ injection. `escapeForLog()` prints such characters as escape sequences instead, 
 stays on one line and shows `Invalid PORT "abc\nFailed to start server: forged"`, followed by the
 usual `: expected an integer from 0 to 65535`. `JSON.stringify()` writes the same escapes a
 JavaScript string literal uses, and `.slice(1, -1)` removes the double quotes it adds around them.
-The `replace()` call's pattern, `[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]`, then escapes three groups of
-characters that `JSON.stringify()` leaves as they are: the remaining control characters (Unicode
-category `Cc`: DEL, U+007F, and the C1 controls U+0080 to U+009F), the invisible format characters
-(category `Cf`), and the line and paragraph separators U+2028 and U+2029 (categories `Zl` and
-`Zp`). A format character cannot start a new line, so it could not add a fake line even
-unescaped, but it can still make the one line misleading. The right-to-left override U+202E can
-make a terminal or log viewer show the text after it in reverse order, and the zero-width space
-U+200B is not shown at all. Both are printed as visible escapes instead, so a `PORT` of `12`,
-U+202E and `34` shows `Invalid PORT "12\u202e34"`. A format character above U+FFFF, such as the
-tag characters U+E0020 to U+E007F, is stored as two UTF-16 code units, each with its own escape, so
-U+E0041 prints as `\udb40\udc41`. An ordinary value such as `abc` comes back unchanged, so the
-messages in the Run section are exactly what the server prints.
+The `replace()` call's pattern, the constant `unsafe`, is
+`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]`. It escapes four groups of characters
+that `JSON.stringify()` leaves as they are: the remaining control characters (Unicode category
+`Cc`: DEL, U+007F, and the C1 controls U+0080 to U+009F), the invisible format characters
+(category `Cf`), the line and paragraph separators U+2028 and U+2029 (categories `Zl` and `Zp`),
+and the default-ignorable code points (`Default_Ignorable_Code_Point`). That last group is the
+code points Unicode marks to display as nothing, whatever their category. It overlaps the format
+characters, and adds invisible ones that are not category `Cf`, such as the variation selectors
+U+FE00 to U+FE0F. A format character, or any other character that displays as nothing, cannot
+start a new line, so it could not add a fake line even unescaped, but it can still make the one
+line misleading. The right-to-left override U+202E can make a terminal or log viewer show the text
+after it in reverse order, and the zero-width space U+200B is not shown at all. Both are printed as
+visible escapes instead, so a `PORT` of `12`, U+202E and `34` shows `Invalid PORT "12\u202e34"`.
+A variation selector is printed the same way: a `PORT` of `30`, U+FE0F and `03` shows
+`Invalid PORT "30\ufe0f03"`. An escaped character above U+FFFF, such as the tag characters U+E0020
+to U+E007F, is stored as two UTF-16 code units, each with its own escape, so U+E0041 prints as
+`\udb40\udc41`. The `HOST` in the listening line goes through `escapeForLog()` too, as the end of
+this section shows. An ordinary value such as `abc` comes back unchanged, so the messages in the
+Run section are exactly what the server prints.
 
 Before `process.exit(1)`, the code waits for `flush()`, the other helper at the top of the file:
 
@@ -711,12 +741,26 @@ server.listen(port, host, () => {
   const actualPort = server.address().port;
   // An IPv6 literal such as ::1 must be wrapped in brackets inside a URL: http://[::1]:3000.
   const urlHost = host.includes(':') ? `[${host}]` : host;
-  console.log(`Server listening on http://${urlHost}:${actualPort}`);
+  // Node's dns.lookup applies IDNA mapping, which drops invisible characters, so a HOST such as
+  // local<U+200B>host binds. Printed raw, its URL would carry bytes the terminal does not show.
+  // Ordinary hosts, such as localhost, 0.0.0.0 and [::1], come back unchanged.
+  console.log(`Server listening on http://${escapeForLog(urlHost)}:${actualPort}`);
 });
 ```
 
 The callback runs only once the server is accepting connections, so the log line never announces
 an address that cannot be reached yet. A host that contains `:` is an IPv6 address.
+
+The host is printed through `escapeForLog()` because name lookup ignores invisible characters.
+Before looking a name up, Node.js converts it to ASCII with IDNA, the scheme that lets domain
+names contain letters such as é, and that conversion drops many characters that display as
+nothing, such as the zero-width space U+200B. So `HOST=local<zero-width space>host` binds the
+same address as `HOST=localhost`. Printed as it is, the log line would look like
+`http://localhost:<port>` in the terminal but hold an invisible character. Escaped, it logs
+`http://local\u200bhost:<port>`, which shows what `HOST` really contains. An ordinary value such as
+`localhost`, `0.0.0.0` or `::1` has nothing to escape, so it prints exactly as you set it, apart
+from the brackets around an IPv6 address. As with the `'error'` listener, only the printed text is
+escaped: `listen()` still receives `HOST` unchanged.
 
 Finally, the process handles the two shutdown signals:
 
@@ -772,12 +816,21 @@ import { createServer } from '../src/app.js';
 ```
 
 One object, `fixture`, holds the server and its URL. Two hooks start one real server before the
-tests and stop it after them:
+tests and stop it after them, and one function, `closeConnectionsOnCrash`, stops a crash in the
+server from stalling the tests:
 
 ```js
 // before fills in both properties once the server is listening; after and every test read them.
 // Sharing them as properties of one const object means no binding is ever reassigned.
 const fixture = { server: undefined, baseUrl: undefined };
+
+// A handler that throws never writes a reply. The test runner catches the exception instead of
+// crashing, so a fetch waiting for that reply would wait forever and the error would never be
+// printed. Closing every connection makes the waiting request fail at once, so the test fails,
+// the run finishes and the runner prints the error. This is an uncaughtExceptionMonitor, which
+// observes the exception without handling it, so nothing masks the error and npm test still
+// exits with code 1.
+const closeConnectionsOnCrash = () => fixture.server.closeAllConnections();
 
 before(async () => {
   const server = createServer();
@@ -796,18 +849,22 @@ before(async () => {
   // address() returns null until the server is listening, so the port is read only after the
   // listen callback has fired.
   fixture.baseUrl = `http://127.0.0.1:${server.address().port}`;
+  // Registered only now, so the monitor never runs before there is a server to close.
+  process.on('uncaughtExceptionMonitor', closeConnectionsOnCrash);
 });
 
 // close() returns the server rather than a promise, so wrapping its callback is what makes the
 // runner wait for the shutdown. On Node.js 24 and later it also closes the idle keep-alive
 // connections fetch leaves open, so the test process exits as soon as the summary prints.
 // fixture.baseUrl stays unset when listen() failed, which before has already reported, so there is
-// nothing to close. A close() error, such as ERR_SERVER_NOT_RUNNING after an early close,
-// rejects the hook so the failure is reported instead of hidden.
+// nothing to close and no monitor to remove. A close() error, such as ERR_SERVER_NOT_RUNNING
+// after an early close, rejects the hook so the failure is reported instead of hidden.
 after(async () => {
   if (fixture.baseUrl === undefined) {
     return;
   }
+  // The tests are over, so the monitor comes off and the process is left as the suite found it.
+  process.off('uncaughtExceptionMonitor', closeConnectionsOnCrash);
   await new Promise((resolve, reject) => {
     fixture.server.close((err) => (err ? reject(err) : resolve()));
   });
@@ -827,6 +884,22 @@ arrives as an `'error'` event instead of through the callback, so `before` also 
 event. It removes that listener once the server is listening. `after` skips `close()` when the
 server never started listening, and otherwise rejects when `close()` reports an error. A rejected
 hook counts as a failure, so a problem is reported rather than hidden.
+
+`closeConnectionsOnCrash` covers the one failure the hooks cannot see: code in `src/app.js` that
+throws while it handles a request. That request never gets a reply. Run standalone, the uncaught
+exception would crash the server, but the test runner catches it with an `'uncaughtException'`
+handler of its own, so the server keeps running and a `fetch` waiting for the reply would wait
+forever. `npm test` would hang and never print the error. So once the server is listening,
+`before` registers `closeConnectionsOnCrash` for the `'uncaughtExceptionMonitor'` event, which
+Node.js emits for every uncaught exception before any `'uncaughtException'` handler runs. The
+function calls `closeAllConnections()`, which closes every connection to the server, including
+one still waiting for a response. The waiting `fetch` fails at once, its test fails, and the run
+finishes and prints the error.
+
+It is a monitor rather than an `'uncaughtException'` handler on purpose. A handler takes the
+exception over, so it can catch a bug and hide it. A monitor only observes the exception, so the
+runner still reports the error and `npm test` still exits with code 1. `after` removes the monitor
+before it closes the server, so the tests leave the process as they found it.
 
 Each test sends a request with the global `fetch` and asserts on the response:
 
@@ -851,8 +924,10 @@ never put `http://[` on the wire. The test uses `http.get` instead, with the opt
 `{ host: '127.0.0.1', port: fixture.server.address().port, path: 'http://[' }`, because
 `http.get` writes `path` into the request line exactly as given. It expects `404`, then sends a
 normal `GET /hello` and expects `200`, which proves the server survived. If a change ever made the
-handler throw on that target, the test would fail at once with the thrown error rather than wait
-for a response that never comes.
+handler throw on that target, `closeConnectionsOnCrash` would close the connection, and the
+request would fail with nothing more than `socket hang up`. So while that one request is open, the
+test registers a monitor of its own, which rejects with the thrown error itself. The test then
+fails at once, and its failure names the real cause.
 
 ### Where a new route would go
 
