@@ -9,6 +9,30 @@ const DEFAULT_PORT = 3000;
 // every IPv4 interface, and HOST=::1 binds the IPv6 loopback instead.
 const DEFAULT_HOST = '127.0.0.1';
 
+// Renders a value for a one-line log message, which guards against log injection (CWE-117): a
+// PORT, or a HOST that getaddrinfo repeats in err.message, could otherwise carry a newline that
+// forges an extra log line, or an escape code the terminal acts on. JSON.stringify escapes \n and
+// the other C0 controls, the backslash and the double quote; the replace adds DEL, the C1
+// controls and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
+function escapeForLog(text) {
+  const escaped = JSON.stringify(String(text)).slice(1, -1);
+  return escaped.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => {
+    return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  });
+}
+
+// Resolves once everything written to `stream` so far has reached the operating system, because
+// process.exit() discards a write still pending when stdout or stderr is a pipe whose reader has
+// fallen behind. Writes complete in order, so this empty write's callback follows the line before
+// it. If the reader has gone, the EPIPE also arrives as an 'error' event that, unhandled, would
+// replace the exit code with a stack trace. The listener stays: an exit follows every flush.
+function flush(stream) {
+  return new Promise((resolve) => {
+    stream.on('error', resolve);
+    stream.write('', resolve);
+  });
+}
+
 // Environment variables are always strings, so unset and empty both fall back to the default.
 // Number() is the documented conversion, so forms such as '0x10' and '1e3' count as 16 and 1000.
 const rawPort = process.env.PORT;
@@ -18,7 +42,9 @@ const port = rawPort ? Number(rawPort) : DEFAULT_PORT;
 // listen() throws for a value such as PORT=abc with one readable line. Port 0 is valid:
 // it asks the operating system for any free port.
 if (!Number.isInteger(port) || port < 0 || port > 65535) {
-  console.error(`Invalid PORT "${rawPort}": expected an integer from 0 to 65535`);
+  console.error(`Invalid PORT "${escapeForLog(rawPort)}": expected an integer from 0 to 65535`);
+  // Top-level await pauses the module here, so the exit still comes before the server exists.
+  await flush(process.stderr);
   process.exit(1);
 }
 
@@ -29,8 +55,12 @@ const server = createServer();
 
 // Registered before listen(): a bind failure such as EADDRINUSE, EACCES or ENOTFOUND arrives as
 // an 'error' event, and with no listener Node.js would throw it as an uncaught stack trace.
-server.on('error', (err) => {
-  console.error(`Failed to start server: ${err.message}`);
+server.on('error', async (err) => {
+  console.error(`Failed to start server: ${escapeForLog(err.message)}`);
+  // The process is already on its way to exit code 1. Without the shutdown handlers, a signal
+  // during the wait below ends it at once instead of running shutdown(), which would exit with 0.
+  process.removeAllListeners('SIGINT').removeAllListeners('SIGTERM');
+  await flush(process.stderr);
   process.exit(1);
 });
 
@@ -45,9 +75,14 @@ server.listen(port, host, () => {
 // Stops the server in response to a signal and exits once every connection has closed.
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down`);
+  // Started at once, so the line goes out and a write error is caught while close() waits.
+  const logFlushed = flush(process.stdout);
   // Since Node.js 19, close() stops accepting connections and also closes idle keep-alive ones,
   // so a finished curl or browser request does not keep the process alive.
-  server.close(() => process.exit(0));
+  server.close(async () => {
+    await logFlushed;
+    process.exit(0);
+  });
 }
 
 // process.once removes each handler after its first signal, so a second Ctrl+C falls through to

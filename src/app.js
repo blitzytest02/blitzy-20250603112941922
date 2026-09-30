@@ -17,17 +17,23 @@ const ALLOWED_METHODS = ['GET', 'HEAD'];
  * @param {http.ServerResponse} res - The response to write.
  * @param {number} statusCode - The HTTP status code, such as 200, 404 or 405.
  * @param {string} body - The fixed response text.
- * @param {Record<string, string>} [extraHeaders] - Headers added after the defaults.
+ * @param {Record<string, string>} [extraHeaders] - Headers added after the defaults. An entry
+ *   named Content-Type or Content-Length, in any letter case, is ignored.
  * @returns {void}
  */
 function send(res, statusCode, body, extraHeaders = {}) {
+  // Header names are case-insensitive, so an extra named Content-Type or Content-Length in any
+  // letter case is dropped: it would otherwise replace a value below or be sent a second time.
+  const extras = Object.entries(extraHeaders).filter(
+    ([name]) => !['content-type', 'content-length'].includes(name.toLowerCase()),
+  );
   res.writeHead(statusCode, {
     // Declaring the charset fixes how clients decode the bytes instead of leaving them to guess.
     'Content-Type': 'text/plain; charset=utf-8',
     // An explicit length, in bytes rather than characters, sends the body unchunked
     // and gives HEAD responses the same length a GET would carry.
     'Content-Length': Buffer.byteLength(body),
-    ...extraHeaders,
+    ...Object.fromEntries(extras),
   });
   res.end(body);
 }

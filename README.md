@@ -160,6 +160,45 @@ that another program already uses, often a server you started earlier and forgot
 Failed to start server: listen EADDRINUSE: address already in use 127.0.0.1:3000
 ```
 
+To see this for yourself, leave the first server from `npm start` running in its terminal, open a
+second terminal in the project directory, and start the server again:
+
+```bash
+npm start
+```
+
+The second start cannot listen on port 3000, because the first server already does:
+
+```text
+> node-hello-tutorial@1.0.0 start
+> node src/server.js
+
+Failed to start server: listen EADDRINUSE: address already in use 127.0.0.1:3000
+```
+
+The `Failed to start server` line goes to stderr, and the process exits with code 1, which npm
+reports as a failed `start` script by exiting with status 1 itself. In bash or zsh, run this right
+after the failed start to see that status:
+
+```bash
+echo $?
+```
+
+```text
+1
+```
+
+The first server is unaffected and keeps running. Call it from the second terminal to confirm
+(the curl options are explained in [Calling the endpoint](#calling-the-endpoint)):
+
+```bash
+curl -s -w "\n" http://127.0.0.1:3000/hello
+```
+
+```text
+Hello world
+```
+
 Stop the other program, or choose another port, for example `PORT=4000 npm start`. The same line
 reports other failures too: `EACCES` for a port your user is not allowed to open,
 `getaddrinfo ENOTFOUND <host>` for a `HOST` name that does not resolve, and
@@ -403,13 +442,18 @@ Every response is written by one helper, `send()`, so the same header rules hold
 
 ```js
 function send(res, statusCode, body, extraHeaders = {}) {
+  // Header names are case-insensitive, so an extra named Content-Type or Content-Length in any
+  // letter case is dropped: it would otherwise replace a value below or be sent a second time.
+  const extras = Object.entries(extraHeaders).filter(
+    ([name]) => !['content-type', 'content-length'].includes(name.toLowerCase()),
+  );
   res.writeHead(statusCode, {
     // Declaring the charset fixes how clients decode the bytes instead of leaving them to guess.
     'Content-Type': 'text/plain; charset=utf-8',
     // An explicit length, in bytes rather than characters, sends the body unchunked
     // and gives HEAD responses the same length a GET would carry.
     'Content-Length': Buffer.byteLength(body),
-    ...extraHeaders,
+    ...Object.fromEntries(extras),
   });
   res.end(body);
 }
@@ -423,8 +467,10 @@ function send(res, statusCode, body, extraHeaders = {}) {
   differ from characters for non-ASCII text: `é` is one character but two bytes. With the length
   known up front, Node.js sends the body in one piece instead of in chunks, and a `HEAD` response
   can report the length a `GET` would carry.
-- `...extraHeaders` adds headers for a single response. Only the `405` response uses it, for
-  `Allow`.
+- `extraHeaders` adds headers for a single response. Only the `405` response uses it, for
+  `Allow`. Because HTTP header names are case-insensitive, `send()` first drops any extra named
+  `Content-Type` or `Content-Length` in any letter case, so those two headers always carry the
+  values `send()` computes and are never sent twice.
 
 The request listener routes each request in three steps:
 
@@ -510,7 +556,9 @@ const port = rawPort ? Number(rawPort) : DEFAULT_PORT;
 // listen() throws for a value such as PORT=abc with one readable line. Port 0 is valid:
 // it asks the operating system for any free port.
 if (!Number.isInteger(port) || port < 0 || port > 65535) {
-  console.error(`Invalid PORT "${rawPort}": expected an integer from 0 to 65535`);
+  console.error(`Invalid PORT "${escapeForLog(rawPort)}": expected an integer from 0 to 65535`);
+  // Top-level await pauses the module here, so the exit still comes before the server exists.
+  await flush(process.stderr);
   process.exit(1);
 }
 ```
@@ -521,7 +569,62 @@ into `NaN`, which fails `Number.isInteger()`, and it also accepts forms such as 
 `1e3` (1000). A rejected value prints the one-line message and exits with code 1 before any
 server exists.
 
-The host is read the same way, with `DEFAULT_HOST` set to `'127.0.0.1'`:
+The rejected value is printed through `escapeForLog()`, a helper defined near the top of the file:
+
+```js
+// Renders a value for a one-line log message, which guards against log injection (CWE-117): a
+// PORT, or a HOST that getaddrinfo repeats in err.message, could otherwise carry a newline that
+// forges an extra log line, or an escape code the terminal acts on. JSON.stringify escapes \n and
+// the other C0 controls, the backslash and the double quote; the replace adds DEL, the C1
+// controls and the U+2028 and U+2029 line breaks. Other text, such as é, is left unchanged.
+function escapeForLog(text) {
+  const escaped = JSON.stringify(String(text)).slice(1, -1);
+  return escaped.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, (char) => {
+    return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+  });
+}
+```
+
+An environment variable can hold any text, including a line break. Printed as it is, a `PORT`
+made of `abc`, a line break and `Failed to start server: forged` would add a second, fake line to
+the output that looks exactly like a real message. Planting lines in a log this way is called log
+injection. `escapeForLog()` prints such characters as escape sequences instead, so the message
+stays on one line and shows `Invalid PORT "abc\nFailed to start server: forged"`, followed by the
+usual `: expected an integer from 0 to 65535`. `JSON.stringify()` writes the same escapes a
+JavaScript string literal uses, and `.slice(1, -1)` removes the double quotes it adds around them.
+The `replace()` call covers the few invisible characters that `JSON.stringify()` leaves as they
+are, among them the Unicode line separators U+2028 and U+2029. An ordinary value such as `abc`
+comes back unchanged, so the messages in the Run section are exactly what the server prints.
+
+Before `process.exit(1)`, the code waits for `flush()`, the other helper at the top of the file:
+
+```js
+// Resolves once everything written to `stream` so far has reached the operating system, because
+// process.exit() discards a write still pending when stdout or stderr is a pipe whose reader has
+// fallen behind. Writes complete in order, so this empty write's callback follows the line before
+// it. If the reader has gone, the EPIPE also arrives as an 'error' event that, unhandled, would
+// replace the exit code with a stack trace. The listener stays: an exit follows every flush.
+function flush(stream) {
+  return new Promise((resolve) => {
+    stream.on('error', resolve);
+    stream.write('', resolve);
+  });
+}
+```
+
+Usually `console.error()` hands its line to the operating system at once. When stderr is piped
+into another program that has fallen behind, though, the pipe is full and Node.js keeps the line
+queued until there is room. `process.exit()` ends the process immediately and throws that queue
+away, so the one line explaining the failure would be lost. `flush()` writes an empty string with
+a callback. A stream completes its writes in order, so the callback runs only once the line
+before it has gone out, and `await` waits for that callback. This is a top-level `await`, which
+ES modules allow outside any function: it pauses the rest of the file, so a rejected `PORT` still
+exits before the server is created. If the reading program has already exited, the write fails
+with `EPIPE`, which Node.js also reports as an `'error'` event on the stream. The `'error'`
+listener resolves the promise as well, so the process ends with its own exit code instead of a
+stack trace.
+
+The host is read the same way as the port, with `DEFAULT_HOST` set to `'127.0.0.1'`:
 
 ```js
 const host = process.env.HOST || DEFAULT_HOST;
@@ -530,8 +633,12 @@ const host = process.env.HOST || DEFAULT_HOST;
 Next the server is created, and an `'error'` listener is attached before `listen()` is called:
 
 ```js
-server.on('error', (err) => {
-  console.error(`Failed to start server: ${err.message}`);
+server.on('error', async (err) => {
+  console.error(`Failed to start server: ${escapeForLog(err.message)}`);
+  // The process is already on its way to exit code 1. Without the shutdown handlers, a signal
+  // during the wait below ends it at once instead of running shutdown(), which would exit with 0.
+  process.removeAllListeners('SIGINT').removeAllListeners('SIGTERM');
+  await flush(process.stderr);
   process.exit(1);
 });
 ```
@@ -540,6 +647,16 @@ server.on('error', (err) => {
 host does not resolve (`ENOTFOUND`). The server reports those failures later, as an `'error'`
 event. Without a listener, Node.js would treat the event as an uncaught error and print a stack
 trace, so the code registers one first and prints a single readable line instead.
+
+The message goes through `escapeForLog()` too, because for `ENOTFOUND` it repeats the `HOST`
+value: `getaddrinfo ENOTFOUND <host>`. A `HOST` containing a line break could otherwise forge a
+line such as `Server listening on ...`. Only the printed text is escaped. `listen()` still
+receives `HOST` exactly as you set it.
+
+The listener is `async` so that it can wait for `flush()` before `process.exit(1)`, as the `PORT`
+check does. Before waiting, it removes the SIGINT and SIGTERM handlers shown at the end of this
+section. The process is already failing, so a signal that arrives while the line is still on its
+way out should stop it at once, not run the shutdown code, which exits with the success code 0.
 
 Then the server starts listening:
 
@@ -561,9 +678,14 @@ Finally, the process handles the two shutdown signals:
 ```js
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down`);
+  // Started at once, so the line goes out and a write error is caught while close() waits.
+  const logFlushed = flush(process.stdout);
   // Since Node.js 19, close() stops accepting connections and also closes idle keep-alive ones,
   // so a finished curl or browser request does not keep the process alive.
-  server.close(() => process.exit(0));
+  server.close(async () => {
+    await logFlushed;
+    process.exit(0);
+  });
 }
 
 // process.once removes each handler after its first signal, so a second Ctrl+C falls through to
@@ -575,8 +697,10 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 ```
 
 SIGINT is what Ctrl+C sends. SIGTERM is the standard "please stop" signal, sent by `kill`, by
-process managers and by `npm run dev` on each restart. The callback given to `server.close()` runs
-once every connection has closed, and `process.exit(0)` then ends the process with the success
+process managers and by `npm run dev` on each restart. `shutdown()` calls `flush()` right after
+logging, so the line is already on its way out while the server closes, and a write error is
+caught from that moment on. The callback given to `server.close()` runs once every connection has
+closed. It waits for that flush, and `process.exit(0)` then ends the process with the success
 code.
 
 ### test/app.test.js: testing the server
@@ -651,4 +775,3 @@ constant, and handle it before the `if (pathname !== HELLO_PATH)` check, because
 answers `404` for every path other than `/hello`. Send its responses through `send()` so they get
 the same headers, and add a test for it to `test/app.test.js`. This project deliberately ships with
 `/hello` as its only endpoint.
-
