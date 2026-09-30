@@ -64,8 +64,8 @@ export function handleRequest(req, res) {
     return;
   }
 
-  // For HEAD, Node.js drops the body itself and keeps the same headers,
-  // including Content-Length: 11.
+  // For HEAD, Node.js drops the body itself, and the response keeps the Content-Type and
+  // Content-Length: 11 that send() sets for GET.
   send(res, 200, 'Hello world');
 }
 

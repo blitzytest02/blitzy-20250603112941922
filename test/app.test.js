@@ -16,17 +16,35 @@ let baseUrl;
 before(async () => {
   server = createServer();
   // Port 0 asks the operating system for any free port, so these tests pass while the reader's
-  // own server holds 3000, and loopback means they need no network access.
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // own server holds 3000, and loopback means they need no network access. A bind failure
+  // arrives as an 'error' event, not through the listen callback, so without this listener the
+  // promise would never settle. It is removed once listening, so it cannot swallow later errors.
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
   // address() returns null until the server is listening, so the port is read only after the
   // listen callback has fired.
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 
 // close() returns the server rather than a promise, so wrapping its callback is what makes the
-// runner wait for the shutdown. Since Node.js 19 it also closes the idle keep-alive connections
-// fetch leaves open, so the test process exits as soon as the summary prints.
-after(() => new Promise((resolve) => server.close(resolve)));
+// runner wait for the shutdown. On Node.js 24 and later it also closes the idle keep-alive
+// connections fetch leaves open, so the test process exits as soon as the summary prints.
+// baseUrl stays unset when listen() failed, which before has already reported, so there is
+// nothing to close. A close() error, such as ERR_SERVER_NOT_RUNNING after an early close,
+// rejects the hook so the failure is reported instead of hidden.
+after(async () => {
+  if (baseUrl === undefined) {
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+});
 
 test('GET /hello returns 200, text/plain and the exact body', async () => {
   const res = await fetch(`${baseUrl}/hello`);

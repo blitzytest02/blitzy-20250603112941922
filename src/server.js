@@ -77,8 +77,8 @@ function shutdown(signal) {
   console.log(`Received ${signal}, shutting down`);
   // Started at once, so the line goes out and a write error is caught while close() waits.
   const logFlushed = flush(process.stdout);
-  // Since Node.js 19, close() stops accepting connections and also closes idle keep-alive ones,
-  // so a finished curl or browser request does not keep the process alive.
+  // On Node.js 24 and later, close() stops accepting connections and also closes idle keep-alive
+  // ones, so a finished curl or browser request does not keep the process alive.
   server.close(async () => {
     await logFlushed;
     process.exit(0);

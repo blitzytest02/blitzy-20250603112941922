@@ -225,13 +225,16 @@ response, only so that your prompt starts on a fresh line. The response body its
 
 ### Seeing the status line and headers
 
-Every HTTP response has three parts:
+Every HTTP response starts with two parts:
 
 - a **status line**, whose numeric **status code** says how the request went (`200` means OK);
-- **headers**, name and value pairs that describe the response;
-- the **body**, the content itself.
+- **headers**, name and value pairs that describe the response.
 
-`-i` makes curl print all three. `-sS` hides the progress meter but still shows errors.
+After them, a response can carry a **body**, the content itself. The response to a `HEAD` request
+never has one, as [The other responses](#the-other-responses) shows.
+
+`-i` makes curl print the status line and headers as well as the body. `-sS` hides the progress
+meter but still shows errors.
 
 ```bash
 curl -sS -i http://127.0.0.1:3000/hello
@@ -265,16 +268,18 @@ icon, on their own. The server answers that request with `404 Not Found`, so a 4
 
 ### The other responses
 
-The server gives a deliberate answer to every request, including the ones it does not serve.
-Every request carries an HTTP **method**, the verb that says what the client wants: `GET` fetches
-a resource, `HEAD` fetches only its headers, and `POST` sends data to it. curl sends `GET` unless
-you tell it otherwise.
+The code in `src/app.js` gives a deliberate answer to every request that Node.js delivers to it,
+including the ones it does not serve. The end of this section covers the few requests that Node.js
+answers itself. Every request carries an HTTP **method**, the verb that says what the client
+wants: `GET` fetches a resource, `HEAD` fetches only its headers, and `POST` is commonly used to
+submit data to it. curl sends `GET` unless you tell it otherwise. The `POST` examples below send an
+empty `POST` with no body, and `src/app.js` never reads a request body.
 
 | Command | Status | What curl prints |
 |---|---|---|
 | `curl -s -w "\n" http://127.0.0.1:3000/goodbye` | `404 Not Found`: no such path | `Not Found` |
 | `curl -s -w "\n" -X POST http://127.0.0.1:3000/hello` | `405 Method Not Allowed`: the path exists, but not for this method | `Method Not Allowed` |
-| `curl -sS -I http://127.0.0.1:3000/hello` | `200 OK` for a `HEAD` request | The same headers as `GET`, including `Content-Length: 11`, and no body |
+| `curl -sS -I http://127.0.0.1:3000/hello` | `200 OK` for a `HEAD` request | The same `Content-Type` and `Content-Length: 11` as `GET`, and no body. The `Date` and connection headers that Node.js adds itself can differ |
 
 A `405` response also tells the client which methods the path does accept, in the `Allow` header:
 
@@ -408,8 +413,8 @@ the server, and the tests.
 | `dev` | `node --watch src/server.js` | `npm run dev` |
 | `test` | `node --test` | `npm test` |
 
-`start` and `test` are standard script names with their own npm commands. Any other script, such
-as `dev`, runs with `npm run <name>`.
+`start` and `test` are standard script names with their own npm commands. Any other script runs
+with `npm run` followed by the script's name, so the `dev` script runs with `npm run dev`.
 
 There is no `dependencies` or `devDependencies` field, because everything the project needs is
 built into Node.js: `node:http` serves requests, `node:test` runs the tests, and the global
@@ -419,8 +424,9 @@ dependency later.
 
 ### src/app.js: answering requests
 
-This module decides every response. Node.js calls its `handleRequest` function once for each
-request, with two objects:
+This module decides the response to every request that Node.js delivers to it. The few requests
+that Node.js answers itself are listed at the end of [The other responses](#the-other-responses).
+For each delivered request, Node.js calls the module's `handleRequest` once, with two objects:
 
 - `req`, the request (an `http.IncomingMessage`). The code reads only `req.method`, such as
   `'GET'`, and `req.url`, the request target, such as `'/hello?name=reader'`.
@@ -438,7 +444,8 @@ const HELLO_PATH = '/hello';
 const ALLOWED_METHODS = ['GET', 'HEAD'];
 ```
 
-Every response is written by one helper, `send()`, so the same header rules hold on every path:
+Every response this module writes goes through one helper, `send()`, so the same header rules
+hold on every path:
 
 ```js
 function send(res, statusCode, body, extraHeaders = {}) {
@@ -472,7 +479,7 @@ function send(res, statusCode, body, extraHeaders = {}) {
   `Content-Type` or `Content-Length` in any letter case, so those two headers always carry the
   values `send()` computes and are never sent twice.
 
-The request listener routes each request in three steps:
+The request listener routes each request it receives in three steps:
 
 ```js
 export function handleRequest(req, res) {
@@ -494,8 +501,8 @@ export function handleRequest(req, res) {
     return;
   }
 
-  // For HEAD, Node.js drops the body itself and keeps the same headers,
-  // including Content-Length: 11.
+  // For HEAD, Node.js drops the body itself, and the response keeps the Content-Type and
+  // Content-Length: 11 that send() sets for GET.
   send(res, 200, 'Hello world');
 }
 ```
@@ -517,18 +524,21 @@ comparison with `HELLO_PATH` is exact and case-sensitive:
 Why `URL.parse()` and not `new URL()`? Anyone can send any request target, including one that is
 not a valid URL. `new URL()` throws a `TypeError` for a target such as `http://[`, and an
 exception thrown inside the request listener that nothing catches ends the whole process, so a
-single bad request would crash the server. `URL.parse()`, available since Node.js 22.1, returns
-`null` instead. The optional chaining operator `?.` turns that `null` into `undefined`, which is
-not `/hello`, so the answer is a `404` and the server keeps serving.
+single bad request would crash the server. `URL.parse()`, available on supported Node.js releases
+(24 and later), returns `null` instead. The optional chaining operator `?.` turns that `null` into
+`undefined`, which is not `/hello`, so the answer is a `404` and the server keeps serving.
 
-**2. Check the path before the method.** An unknown path returns `404 Not Found` whatever its
-method, which is why `POST /goodbye` gets `404` and not `405`. Test 6 checks exactly this.
+**2. Check the path before the method.** A request that reaches the handler with an unknown path
+gets `404 Not Found` whatever its method, which is why `POST /goodbye` gets `404` and not `405`.
+Test 6 checks exactly this.
 
-**3. Check the method.** A method outside `ALLOWED_METHODS` gets `405 Method Not Allowed`. HTTP
-requires a `405` to list the accepted methods, so the code joins `ALLOWED_METHODS` into
-`Allow: GET, HEAD`. Everything else is a `GET` or `HEAD` for `/hello` and gets `200 OK` with
-`Hello world`. For `HEAD`, Node.js sends the same status and headers but drops the body by
-itself, so the code needs no separate `HEAD` branch.
+**3. Check the method.** A request that reaches this step with a method outside `ALLOWED_METHODS`
+gets `405 Method Not Allowed`. HTTP requires a `405` to list the accepted methods, so the code
+joins `ALLOWED_METHODS` into `Allow: GET, HEAD`. Everything else is a `GET` or `HEAD` for `/hello`
+and gets `200 OK` with `Hello world`. For `HEAD`, Node.js sends the same status and the same
+`Content-Type` and `Content-Length: 11` that `send()` sets for `GET`, but drops the body by itself,
+so the code needs no separate `HEAD` branch. Only the `Date` and connection headers, which Node.js
+adds itself, can differ between the two.
 
 The module's only other export builds the server:
 
@@ -592,9 +602,14 @@ injection. `escapeForLog()` prints such characters as escape sequences instead, 
 stays on one line and shows `Invalid PORT "abc\nFailed to start server: forged"`, followed by the
 usual `: expected an integer from 0 to 65535`. `JSON.stringify()` writes the same escapes a
 JavaScript string literal uses, and `.slice(1, -1)` removes the double quotes it adds around them.
-The `replace()` call covers the few invisible characters that `JSON.stringify()` leaves as they
-are, among them the Unicode line separators U+2028 and U+2029. An ordinary value such as `abc`
-comes back unchanged, so the messages in the Run section are exactly what the server prints.
+The `replace()` call's pattern, `[\p{Cc}\p{Zl}\p{Zp}]`, then escapes two groups of characters that
+`JSON.stringify()` leaves as they are: the remaining control characters (Unicode category `Cc`:
+DEL, U+007F, and the C1 controls U+0080 to U+009F) and the line and paragraph separators U+2028
+and U+2029 (categories `Zl` and `Zp`). Other invisible characters, such as the zero-width space
+U+200B or the right-to-left override U+202E (Unicode format characters, category `Cf`), are
+printed unchanged. They cannot start a new line, so the message still stays on one line. An
+ordinary value such as `abc` comes back unchanged, so the messages in the Run section are exactly
+what the server prints.
 
 Before `process.exit(1)`, the code waits for `flush()`, the other helper at the top of the file:
 
@@ -680,8 +695,8 @@ function shutdown(signal) {
   console.log(`Received ${signal}, shutting down`);
   // Started at once, so the line goes out and a write error is caught while close() waits.
   const logFlushed = flush(process.stdout);
-  // Since Node.js 19, close() stops accepting connections and also closes idle keep-alive ones,
-  // so a finished curl or browser request does not keep the process alive.
+  // On Node.js 24 and later, close() stops accepting connections and also closes idle keep-alive
+  // ones, so a finished curl or browser request does not keep the process alive.
   server.close(async () => {
     await logFlushed;
     process.exit(0);
@@ -724,23 +739,45 @@ Two hooks start one real server before the tests and stop it after them:
 before(async () => {
   server = createServer();
   // Port 0 asks the operating system for any free port, so these tests pass while the reader's
-  // own server holds 3000, and loopback means they need no network access.
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // own server holds 3000, and loopback means they need no network access. A bind failure
+  // arrives as an 'error' event, not through the listen callback, so without this listener the
+  // promise would never settle. It is removed once listening, so it cannot swallow later errors.
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
   // address() returns null until the server is listening, so the port is read only after the
   // listen callback has fired.
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
 
 // close() returns the server rather than a promise, so wrapping its callback is what makes the
-// runner wait for the shutdown. Since Node.js 19 it also closes the idle keep-alive connections
-// fetch leaves open, so the test process exits as soon as the summary prints.
-after(() => new Promise((resolve) => server.close(resolve)));
+// runner wait for the shutdown. On Node.js 24 and later it also closes the idle keep-alive
+// connections fetch leaves open, so the test process exits as soon as the summary prints.
+// baseUrl stays unset when listen() failed, which before has already reported, so there is
+// nothing to close. A close() error, such as ERR_SERVER_NOT_RUNNING after an early close,
+// rejects the hook so the failure is reported instead of hidden.
+after(async () => {
+  if (baseUrl === undefined) {
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+});
 ```
 
 `before` runs once before the first test and `after` once after the last. `listen()` and
-`close()` report completion through callbacks, not promises, so each hook passes a promise's
-`resolve` function as the callback. The runner waits for that promise, so no test starts before
-the server is listening, and the process does not exit before the server has closed.
+`close()` report through callbacks, not promises, so each hook wraps its call in a promise that
+the runner waits for. No test starts before the server is listening, and the process does not
+exit before the server has closed. A failure to listen, such as a port that cannot be bound,
+arrives as an `'error'` event instead of through the callback, so `before` also rejects on that
+event. It removes that listener once the server is listening. `after` skips `close()` when the
+server never started listening, and otherwise rejects when `close()` reports an error. A rejected
+hook counts as a failure, so a problem is reported rather than hidden.
 
 Each test sends a request with the global `fetch` and asserts on the response:
 
