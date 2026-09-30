@@ -131,7 +131,8 @@ This runs the server with `node --watch`, which restarts it whenever you save `s
 `src/app.js`. On each save, Node.js prints `Change detected in` followed by the changed file's path,
 then `Restarting 'src/server.js'`. The old server logs `Received SIGTERM, shutting down`, because
 watch mode stops it with the SIGTERM signal, and the new one logs its `Server listening on` line.
-Stop it with Ctrl+C.
+Stop it with Ctrl+C. In this mode, one Ctrl+C stops the server at once, as
+[Stopping the server](#stopping-the-server) explains.
 
 ### Stopping the server
 
@@ -152,6 +153,11 @@ depends on the shell npm runs the script with, `/bin/sh`. With dash, the `/bin/s
 Ubuntu, the server behaves as it does when run directly. With bash, the `/bin/sh` of macOS and
 Fedora, npm passes the Ctrl+C on to the server as a second SIGINT, so the server stops at once,
 even with a request open, and may stop before it prints its shutdown line.
+
+Under `npm run dev`, a single Ctrl+C always stops the server at once, even with a request open,
+whichever shell npm uses, because Node.js watch mode passes the Ctrl+C on to the server as a
+second SIGINT. As with bash under `npm start`, the server may stop before it prints its shutdown
+line. npm then reports exit status 130 with dash but 0 with bash.
 
 On Windows, Ctrl+C delivers SIGINT the same way, but SIGTERM, the other signal the server handles,
 is not delivered there as it is on macOS and Linux.
@@ -262,8 +268,10 @@ The `Date` value varies. The body has no trailing newline, so your prompt appear
 
 On this response, the code in `src/app.js` sets only `Content-Type` and `Content-Length`. Node.js
 adds `Date`, `Connection` and `Keep-Alive` itself: `Connection: keep-alive` lets the client reuse
-the same connection for its next request, and `Keep-Alive: timeout=5` says the server closes a
-connection that stays idle for 5 seconds.
+the same connection for its next request, and `Keep-Alive: timeout=5` tells the client it can count
+on reusing the connection for at least 5 idle seconds. Node.js closes an idle connection about a
+second later, after roughly 6 seconds, so a request already on its way when the 5 seconds run out
+is still served.
 
 ### In a browser
 
@@ -744,9 +752,9 @@ lost, but the shutdown carries on. The callback given to `server.close()` runs o
 connection has closed. Idle keep-alive connections are closed at once, but a client that holds a
 request open keeps the callback waiting until that connection ends, and a second Ctrl+C ends the
 process immediately instead. That is how `node src/server.js` behaves when run directly;
-[Stopping the server](#stopping-the-server) explains how `npm start` can change it. Once the
-callback runs, it waits for the flush, and `process.exit(0)` then ends the process with the
-success code.
+[Stopping the server](#stopping-the-server) explains how `npm start` can change it and how
+`npm run dev` always does. Once the callback runs, it waits for the flush, and `process.exit(0)`
+then ends the process with the success code.
 
 ### test/app.test.js: testing the server
 
